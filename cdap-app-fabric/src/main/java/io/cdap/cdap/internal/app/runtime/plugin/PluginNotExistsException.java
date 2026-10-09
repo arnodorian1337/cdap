@@ -40,6 +40,11 @@ public class PluginNotExistsException extends NotFoundException {
     super("plugin", String.format("%s:%s:%s", namespace.getNamespace(), type, name));
   }
 
+  public PluginNotExistsException(NamespaceId namespace, String type, String name,
+      Throwable cause) {
+    super("plugin", String.format("%s:%s:%s", namespace.getNamespace(), type, name), cause);
+  }
+
   public PluginNotExistsException(ArtifactId artifactId, String type, String name) {
     super("plugin", String.format("%s:%s:%s:%s:%s",
         artifactId.getNamespace(), type, name, artifactId.getArtifact(),

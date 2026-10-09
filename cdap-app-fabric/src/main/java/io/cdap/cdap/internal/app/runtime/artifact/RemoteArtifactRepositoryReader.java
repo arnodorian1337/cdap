@@ -21,14 +21,18 @@ import com.google.common.io.ByteStreams;
 import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonParseException;
 import com.google.inject.Inject;
 import io.cdap.cdap.api.artifact.ArtifactRange;
 import io.cdap.cdap.api.artifact.ArtifactScope;
 import io.cdap.cdap.api.data.schema.Schema;
+import io.cdap.cdap.api.plugin.PluginClass;
+import io.cdap.cdap.api.plugin.Requirements;
 import io.cdap.cdap.api.retry.RetryableException;
-import io.cdap.cdap.common.ArtifactNotFoundException;
-import io.cdap.cdap.common.NotFoundException;
 import io.cdap.cdap.api.service.ServiceUnavailableException;
+import io.cdap.cdap.common.ArtifactNotFoundException;
+import io.cdap.cdap.common.NamespaceNotFoundException;
+import io.cdap.cdap.common.NotFoundException;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.http.DefaultHttpRequestConfig;
 import io.cdap.cdap.common.id.Id;
@@ -39,8 +43,10 @@ import io.cdap.cdap.common.service.RetryStrategies;
 import io.cdap.cdap.common.service.RetryStrategy;
 import io.cdap.cdap.gateway.handlers.AppLifecycleHttpHandler;
 import io.cdap.cdap.gateway.handlers.ArtifactHttpHandlerInternal;
+import io.cdap.cdap.internal.app.runtime.plugin.PluginNotExistsException;
 import io.cdap.cdap.internal.io.SchemaTypeAdapter;
 import io.cdap.cdap.proto.artifact.ArtifactSortOrder;
+import io.cdap.cdap.proto.id.ArtifactId;
 import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.cdap.security.spi.authorization.UnauthorizedException;
 import io.cdap.common.http.HttpMethod;
@@ -49,11 +55,16 @@ import io.cdap.common.http.HttpResponse;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Type;
 import java.net.HttpURLConnection;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import org.apache.twill.filesystem.Location;
@@ -65,19 +76,24 @@ import org.apache.twill.filesystem.LocationFactory;
  */
 public class RemoteArtifactRepositoryReader implements ArtifactRepositoryReader {
 
+  private static final String PLUGINS_URL_FORMAT =
+      "namespaces/%s/artifacts/%s/versions/%s/extensions/%s/plugins/%s?pluginNamespace=%s";
+
   private static final Gson GSON = new GsonBuilder()
       .registerTypeAdapter(Schema.class, new SchemaTypeAdapter())
+      .registerTypeAdapter(Requirements.class, new RequirementsCodec())
       .create();
   private static final Type ARTIFACT_DETAIL_TYPE = new TypeToken<ArtifactDetail>() {
   }.getType();
   private static final Type ARTIFACT_DETAIL_LIST_TYPE = new TypeToken<List<ArtifactDetail>>() {
+  }.getType();
+  private static final Type PLUGIN_ENTRY_LIST_TYPE = new TypeToken<List<PluginEntry>>() {
   }.getType();
   private static final Predicate<Throwable> RETRYABLE_PREDICATE =
       throwable -> (throwable instanceof RetryableException);
   private static final int RETRY_BASE_DELAY_MILLIS = 100;
   private static final int RETRY_MAX_DELAY_MILLIS = 5000;
   private static final int RETRY_TIMEOUT_SECS = 300;
-
   private final RemoteClient remoteClient;
   private final LocationFactory locationFactory;
 
@@ -249,4 +265,166 @@ public class RemoteArtifactRepositoryReader implements ArtifactRepositoryReader 
   public RemoteClient getRemoteClient() {
     return remoteClient;
   }
+
+  /**
+   * Fetches plugins extending the given parent artifact and applies the predicate, sort order, and
+   * limit without resolving or localizing artifact {@link Location}s.
+   *
+   * @param namespaceId namespace to search for plugins
+   * @param parentArtifactId parent artifact id
+   * @param pluginType plugin type
+   * @param pluginName plugin name
+   * @param pluginPredicate predicate to filter candidate plugin artifacts
+   * @param limit maximum number of plugins to return
+   * @param order sort order for the returned map
+   * @return an unmodifiable sorted map of plugin descriptors (with {@code null} {@link Location}
+   *     and preserved {@code locationURI}) to plugin classes
+   * @throws IOException if communication with the remote endpoint fails, the response body is
+   *     malformed, or an unexpected 404 is received
+   * @throws PluginNotExistsException if no matching plugins exist
+   * @throws ArtifactNotFoundException if the parent artifact does not exist
+   * @throws NamespaceNotFoundException if the parent or plugin namespace does not exist
+   */
+  public SortedMap<ArtifactDescriptor, PluginClass> getPlugins(
+      NamespaceId namespaceId,
+      Id.Artifact parentArtifactId,
+      String pluginType,
+      String pluginName,
+      com.google.common.base.Predicate<ArtifactId> pluginPredicate,
+      int limit,
+      ArtifactSortOrder order)
+      throws IOException, PluginNotExistsException, ArtifactNotFoundException,
+      NamespaceNotFoundException {
+
+    String url = buildUrl(namespaceId, parentArtifactId, pluginType, pluginName);
+    HttpRequest.Builder requestBuilder = getRemoteClient().requestBuilder(HttpMethod.GET, url);
+
+    HttpResponse httpResponse;
+    try {
+      httpResponse = execute(requestBuilder.build());
+    } catch (NotFoundException e) {
+      throw translateNotFoundException(
+          e, namespaceId, parentArtifactId, pluginType, pluginName);
+    } catch (ServiceUnavailableException e) {
+      throw e;
+    } catch (RetryableException e) {
+      if (e.getCause() instanceof ServiceUnavailableException) {
+        throw (ServiceUnavailableException) e.getCause();
+      }
+      throw new IOException(e);
+    }
+
+    List<PluginEntry> entries;
+    try {
+      entries = GSON.fromJson(httpResponse.getResponseBodyAsString(), PLUGIN_ENTRY_LIST_TYPE);
+    } catch (JsonParseException e) {
+      throw new IOException(
+          String.format("Invalid plugin list response for %s:%s:%s.",
+              namespaceId, pluginType, pluginName), e);
+    }
+
+    SortedMap<ArtifactDescriptor, PluginClass> filteredPlugins =
+        filterAndSortPlugins(entries, pluginPredicate, order);
+    SortedMap<ArtifactDescriptor, PluginClass> pluginsList =
+        applyLimit(filteredPlugins, limit, order);
+    if (pluginsList.isEmpty()) {
+      throw new PluginNotExistsException(namespaceId, pluginType, pluginName);
+    }
+    return Collections.unmodifiableSortedMap(pluginsList);
+  }
+
+  private static IOException translateNotFoundException(
+      NotFoundException e,
+      NamespaceId namespaceId,
+      Id.Artifact parentArtifactId,
+      String pluginType,
+      String pluginName)
+      throws PluginNotExistsException, ArtifactNotFoundException, NamespaceNotFoundException {
+    String errorMessage = e.getMessage();
+    if (errorMessage == null) {
+      return new IOException("Unexpected 404 response while fetching plugins.", e);
+    }
+
+    NamespaceId parentNamespace = parentArtifactId.getNamespace().toEntityId();
+    ArtifactId parentProtoId = parentArtifactId.toEntityId();
+
+    throwIfMatches(errorMessage,
+        new PluginNotExistsException(parentNamespace, pluginType, pluginName, e));
+    throwIfMatches(errorMessage,
+        new PluginNotExistsException(namespaceId, pluginType, pluginName, e));
+    throwIfMatches(errorMessage, new ArtifactNotFoundException(parentProtoId, e));
+    throwIfMatches(errorMessage,
+        new ArtifactNotFoundException(parentNamespace, parentArtifactId.getName(), e));
+    throwIfMatches(errorMessage, new NamespaceNotFoundException(parentNamespace, e));
+    throwIfMatches(errorMessage, new NamespaceNotFoundException(namespaceId, e));
+
+    return new IOException(errorMessage, e);
+  }
+
+  private static <T extends NotFoundException> void throwIfMatches(
+      String errorMessage, T candidate) throws T {
+    if (errorMessage.equals(candidate.getMessage())) {
+      throw candidate;
+    }
+  }
+
+  private static SortedMap<ArtifactDescriptor, PluginClass> filterAndSortPlugins(
+      List<PluginEntry> entries,
+      com.google.common.base.Predicate<ArtifactId> pluginPredicate,
+      ArtifactSortOrder order) {
+    SortedMap<ArtifactDescriptor, PluginClass> plugins = createPluginMap(order);
+    for (PluginEntry entry : entries) {
+      ArtifactDescriptor desc = entry.getDescriptor();
+      ArtifactId protoId = Artifacts.toProtoArtifactId(
+          new NamespaceId(desc.getNamespace()), desc.getArtifactId());
+      if (pluginPredicate.apply(protoId)) {
+        plugins.putIfAbsent(desc, entry.getPluginClass());
+      }
+    }
+    return plugins;
+  }
+
+  private static SortedMap<ArtifactDescriptor, PluginClass> applyLimit(
+      SortedMap<ArtifactDescriptor, PluginClass> plugins, int limit, ArtifactSortOrder order) {
+    if (limit <= 0) {
+      return Collections.emptySortedMap();
+    }
+    if (plugins.size() <= limit) {
+      return plugins;
+    }
+    SortedMap<ArtifactDescriptor, PluginClass> pluginsList = createPluginMap(order);
+    plugins.entrySet().stream()
+        .limit(limit)
+        .forEach(entry -> pluginsList.put(entry.getKey(), entry.getValue()));
+    return pluginsList;
+  }
+
+  private static SortedMap<ArtifactDescriptor, PluginClass> createPluginMap(
+      ArtifactSortOrder order) {
+    return order == ArtifactSortOrder.DESC
+        ? new TreeMap<>(Collections.reverseOrder())
+        : new TreeMap<>();
+  }
+
+  private static String buildUrl(NamespaceId namespaceId, Id.Artifact parentArtifactId,
+      String pluginType, String pluginName) {
+    return String.format(
+        PLUGINS_URL_FORMAT,
+        encodeUrlSegment(parentArtifactId.getNamespace().getId()),
+        encodeUrlSegment(parentArtifactId.getName()),
+        encodeUrlSegment(parentArtifactId.getVersion().getVersion()),
+        encodeUrlSegment(pluginType),
+        encodeUrlSegment(pluginName),
+        encodeUrlSegment(namespaceId.getNamespace()));
+  }
+
+  private static String encodeUrlSegment(String segment) {
+    try {
+      // cdap-http decodes @PathParam via RFC 3986 URI.getPath(), where '+' is literal.
+      return URLEncoder.encode(segment, StandardCharsets.UTF_8.name()).replace("+", "%20");
+    } catch (UnsupportedEncodingException error) {
+      throw new AssertionError(error);
+    }
+  }
 }
+

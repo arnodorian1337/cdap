@@ -30,14 +30,21 @@ import io.cdap.cdap.api.artifact.ArtifactScope;
 import io.cdap.cdap.api.artifact.ArtifactVersion;
 import io.cdap.cdap.api.artifact.ArtifactVersionRange;
 import io.cdap.cdap.api.data.schema.Schema;
+import io.cdap.cdap.api.plugin.PluginClass;
+import io.cdap.cdap.api.plugin.Requirements;
+import io.cdap.cdap.common.ArtifactNotFoundException;
 import io.cdap.cdap.common.BadRequestException;
 import io.cdap.cdap.common.NamespaceNotFoundException;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.http.LocationBodyProducer;
 import io.cdap.cdap.common.id.Id;
 import io.cdap.cdap.common.namespace.NamespaceQueryAdmin;
+import io.cdap.cdap.internal.app.runtime.artifact.ArtifactDescriptor;
 import io.cdap.cdap.internal.app.runtime.artifact.ArtifactDetail;
 import io.cdap.cdap.internal.app.runtime.artifact.ArtifactRepository;
+import io.cdap.cdap.internal.app.runtime.artifact.PluginEntry;
+import io.cdap.cdap.internal.app.runtime.artifact.RequirementsCodec;
+import io.cdap.cdap.internal.app.runtime.plugin.PluginNotExistsException;
 import io.cdap.cdap.internal.io.SchemaTypeAdapter;
 import io.cdap.cdap.proto.artifact.ArtifactSortOrder;
 import io.cdap.cdap.proto.id.ArtifactId;
@@ -51,6 +58,7 @@ import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
+import java.io.IOException;
 import java.lang.reflect.Type;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -61,6 +69,8 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.SortedMap;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
@@ -81,10 +91,13 @@ public class ArtifactHttpHandlerInternal extends AbstractHttpHandler {
   private static final Logger LOG = LoggerFactory.getLogger(ArtifactHttpHandlerInternal.class);
   private static final Gson GSON = new GsonBuilder()
       .registerTypeAdapter(Schema.class, new SchemaTypeAdapter())
+      .registerTypeAdapter(Requirements.class, new RequirementsCodec())
       .create();
   private static final Type ARTIFACT_INFO_LIST_TYPE = new TypeToken<List<ArtifactInfo>>() {
   }.getType();
   private static final Type ARTIFACT_DETAIL_LIST_TYPE = new TypeToken<List<ArtifactDetail>>() {
+  }.getType();
+  private static final Type PLUGIN_ENTRY_LIST_TYPE = new TypeToken<List<PluginEntry>>() {
   }.getType();
 
   private final ArtifactRepository artifactRepository;
@@ -269,4 +282,67 @@ public class ArtifactHttpHandlerInternal extends AbstractHttpHandler {
     }
     return namespace;
   }
+
+  /**
+   * Returns all plugins of the given type and name available to the specified parent artifact.
+   *
+   * @throws NamespaceNotFoundException if the parent or plugin namespace does not exist
+   * @throws BadRequestException if the namespace, artifact name, or artifact version is invalid
+   * @throws ArtifactNotFoundException if the parent artifact does not exist
+   * @throws PluginNotExistsException if no matching plugins exist
+   * @throws IOException if there was an error reading from the artifact store
+   */
+  @GET
+  @Path("/namespaces/{namespace-id}/artifacts/{artifact-name}/versions/{artifact-version}"
+      + "/extensions/{plugin-type}/plugins/{plugin-name}")
+  public void getArtifactPlugin(HttpRequest request, HttpResponder responder,
+      @PathParam("namespace-id") String namespaceId,
+      @PathParam("artifact-name") String artifactName,
+      @PathParam("artifact-version") String artifactVersion,
+      @PathParam("plugin-type") String pluginType,
+      @PathParam("plugin-name") String pluginName,
+      @QueryParam("pluginNamespace") @Nullable String pluginNamespace)
+      throws NamespaceNotFoundException, BadRequestException, ArtifactNotFoundException,
+      PluginNotExistsException, IOException {
+
+    NamespaceId parsedParentNamespace;
+    NamespaceId parsedPluginNamespace;
+    ArtifactId parsedParentArtifactId;
+    try {
+      parsedParentNamespace = Ids.namespace(namespaceId);
+      parsedPluginNamespace = pluginNamespace != null
+          ? Ids.namespace(pluginNamespace)
+          : parsedParentNamespace;
+      parsedParentArtifactId = parsedParentNamespace.artifact(artifactName, artifactVersion);
+    } catch (IllegalArgumentException e) {
+      throw new BadRequestException(e.getMessage(), e);
+    }
+
+    NamespaceId parentNamespace = validateAndGetScopedNamespace(
+        parsedParentNamespace,
+        NamespaceId.SYSTEM.equals(parsedParentNamespace)
+            ? ArtifactScope.SYSTEM
+            : ArtifactScope.USER);
+    NamespaceId targetPluginNamespace = parsedPluginNamespace.equals(parsedParentNamespace)
+        ? parentNamespace
+        : validateAndGetScopedNamespace(
+            parsedPluginNamespace,
+            NamespaceId.SYSTEM.equals(parsedPluginNamespace)
+                ? ArtifactScope.SYSTEM
+                : ArtifactScope.USER);
+    Id.Artifact parentArtifactId = Id.Artifact.fromEntityId(parsedParentArtifactId);
+
+    SortedMap<ArtifactDescriptor, PluginClass> plugins = artifactRepository.getPlugins(
+        targetPluginNamespace, parentArtifactId, pluginType, pluginName,
+        id -> NamespaceId.SYSTEM.equals(id.getParent())
+            || targetPluginNamespace.equals(id.getParent()),
+        Integer.MAX_VALUE, ArtifactSortOrder.UNORDERED);
+
+    List<PluginEntry> pluginEntries = plugins.entrySet().stream()
+        .map(entry -> new PluginEntry(entry.getKey(), entry.getValue()))
+        .collect(Collectors.toList());
+
+    responder.sendJson(HttpResponseStatus.OK, GSON.toJson(pluginEntries, PLUGIN_ENTRY_LIST_TYPE));
+  }
+
 }

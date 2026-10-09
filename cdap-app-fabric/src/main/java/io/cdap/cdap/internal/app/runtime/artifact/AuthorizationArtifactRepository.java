@@ -27,6 +27,7 @@ import io.cdap.cdap.api.plugin.PluginClass;
 import io.cdap.cdap.api.plugin.PluginSelector;
 import io.cdap.cdap.app.guice.AppFabricServiceRuntimeModule;
 import io.cdap.cdap.common.ArtifactNotFoundException;
+import io.cdap.cdap.common.NamespaceNotFoundException;
 import io.cdap.cdap.common.NotFoundException;
 import io.cdap.cdap.common.id.Id;
 import io.cdap.cdap.internal.app.runtime.plugin.PluginNotExistsException;
@@ -190,7 +191,8 @@ public class AuthorizationArtifactRepository implements ArtifactRepository {
       NamespaceId namespace, Id.Artifact artifactId, String pluginType, String pluginName,
       Predicate<ArtifactId> pluginPredicate, int limit,
       ArtifactSortOrder order)
-      throws IOException, PluginNotExistsException, ArtifactNotFoundException {
+      throws IOException, PluginNotExistsException, ArtifactNotFoundException,
+      NamespaceNotFoundException {
     return delegate.getPlugins(namespace, artifactId, pluginType, pluginName, pluginPredicate,
         limit, order);
   }

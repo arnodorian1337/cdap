@@ -30,6 +30,11 @@ public class NamespaceNotFoundException extends NotFoundException {
     this.namespace = id;
   }
 
+  public NamespaceNotFoundException(NamespaceId id, Throwable cause) {
+    super(id, id.toString(), cause);
+    this.namespace = id;
+  }
+
   public NamespaceId getId() {
     return namespace;
   }

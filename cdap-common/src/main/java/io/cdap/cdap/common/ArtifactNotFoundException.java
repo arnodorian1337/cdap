@@ -32,8 +32,16 @@ public class ArtifactNotFoundException extends NotFoundException {
     this(namespace.getNamespace(), name);
   }
 
+  public ArtifactNotFoundException(NamespaceId namespace, String name, Throwable cause) {
+    super("artifact", namespace.getNamespace() + ":" + name, cause);
+  }
+
   public ArtifactNotFoundException(ArtifactId artifactId) {
     super("artifact", artifactId.toString());
+  }
+
+  public ArtifactNotFoundException(ArtifactId artifactId, Throwable cause) {
+    super("artifact", artifactId.toString(), cause);
   }
 
   public ArtifactNotFoundException(String namespace, String name, String version) {

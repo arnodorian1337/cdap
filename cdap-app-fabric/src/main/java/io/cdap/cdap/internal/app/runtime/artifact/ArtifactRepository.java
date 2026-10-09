@@ -27,6 +27,7 @@ import io.cdap.cdap.common.ArtifactAlreadyExistsException;
 import io.cdap.cdap.common.ArtifactNotFoundException;
 import io.cdap.cdap.common.ArtifactRangeNotFoundException;
 import io.cdap.cdap.common.InvalidArtifactException;
+import io.cdap.cdap.common.NamespaceNotFoundException;
 import io.cdap.cdap.common.id.Id;
 import io.cdap.cdap.internal.app.runtime.plugin.PluginNotExistsException;
 import io.cdap.cdap.proto.artifact.ApplicationClassInfo;
@@ -184,6 +185,9 @@ public interface ArtifactRepository extends ArtifactRepositoryReader {
    * @param order the order of the result
    * @return an unmodifiable sorted map from plugin artifact to plugins in that artifact
    * @throws ArtifactNotFoundException if the given artifact does not exist
+   * @throws NamespaceNotFoundException if the given namespace does not exist
+   * @throws PluginNotExistsException if no plugins of the given type and name are available to
+   *     the given artifact
    * @throws IOException if there was an exception reading plugin metadata from the artifact
    *     store
    */
@@ -191,7 +195,8 @@ public interface ArtifactRepository extends ArtifactRepositoryReader {
       NamespaceId namespace, Id.Artifact artifactId, String pluginType, String pluginName,
       com.google.common.base.Predicate<io.cdap.cdap.proto.id.ArtifactId> pluginPredicate,
       int limit, ArtifactSortOrder order)
-      throws IOException, PluginNotExistsException, ArtifactNotFoundException;
+      throws IOException, PluginNotExistsException, ArtifactNotFoundException,
+      NamespaceNotFoundException;
 
   /**
    * Returns a {@link Map.Entry} representing the plugin information for the plugin being

@@ -24,6 +24,7 @@ import io.cdap.cdap.api.artifact.CloseableClassLoader;
 import io.cdap.cdap.api.plugin.PluginClass;
 import io.cdap.cdap.api.plugin.PluginSelector;
 import io.cdap.cdap.common.ArtifactNotFoundException;
+import io.cdap.cdap.common.NamespaceNotFoundException;
 import io.cdap.cdap.common.NotFoundException;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.id.Id;
@@ -124,8 +125,18 @@ public class RemoteArtifactRepository implements ArtifactRepository {
       String pluginType, String pluginName,
       Predicate<ArtifactId> pluginPredicate, int limit,
       ArtifactSortOrder order)
-      throws IOException, PluginNotExistsException, ArtifactNotFoundException {
-    throw new UnsupportedOperationException();
+      throws IOException, PluginNotExistsException, ArtifactNotFoundException,
+      NamespaceNotFoundException {
+    return getRemoteReader().getPlugins(
+        namespace, artifactId, pluginType, pluginName, pluginPredicate, limit, order);
+  }
+
+  private RemoteArtifactRepositoryReader getRemoteReader() {
+    if (!(artifactRepositoryReader instanceof RemoteArtifactRepositoryReader)) {
+      throw new UnsupportedOperationException(
+          "artifactRepositoryReader must be an instance of RemoteArtifactRepositoryReader");
+    }
+    return (RemoteArtifactRepositoryReader) artifactRepositoryReader;
   }
 
   @Override
