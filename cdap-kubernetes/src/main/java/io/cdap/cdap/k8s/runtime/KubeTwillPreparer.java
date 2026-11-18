@@ -51,6 +51,7 @@ import io.kubernetes.client.openapi.models.V1Container;
 import io.kubernetes.client.openapi.models.V1ContainerBuilder;
 import io.kubernetes.client.openapi.models.V1Deployment;
 import io.kubernetes.client.openapi.models.V1DeploymentBuilder;
+import io.kubernetes.client.openapi.models.V1DeploymentStrategy;
 import io.kubernetes.client.openapi.models.V1DownwardAPIVolumeFile;
 import io.kubernetes.client.openapi.models.V1DownwardAPIVolumeSource;
 import io.kubernetes.client.openapi.models.V1EmptyDirVolumeSource;
@@ -81,7 +82,6 @@ import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.Writer;
-import java.lang.annotation.Annotation;
 import java.lang.reflect.Type;
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -215,6 +215,8 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
   private StringBuilder globalJvmOptions;
   private final V1EmptyDirVolumeSource workDirVolumeSource;
   private boolean shouldLocalizeConfigurationAsConfigmap;
+  private boolean recreateStrategy;
+  private Long terminationGracePeriodSeconds;
 
   KubeTwillPreparer(MasterEnvironmentContext masterEnvContext, ApiClient apiClient,
       String kubeNamespace,
@@ -277,6 +279,8 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
     this.globalJvmOptions = new StringBuilder();
     this.workDirVolumeSource = new V1EmptyDirVolumeSource();
     this.containerProbes = new HashMap<>();
+    this.recreateStrategy = false;
+    this.terminationGracePeriodSeconds = null;
   }
 
   @Override
@@ -436,6 +440,14 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
     if (config.containsKey(MasterOptionConstants.RUNTIME_NAMESPACE)) {
       cdapRuntimeNamespace = config.get(MasterOptionConstants.RUNTIME_NAMESPACE);
     }
+    if (config.containsKey(MasterOptionConstants.K8S_RECREATE_STRATEGY)) {
+      recreateStrategy = Boolean.parseBoolean(
+          config.get(MasterOptionConstants.K8S_RECREATE_STRATEGY));
+    }
+    if (config.containsKey(MasterOptionConstants.K8S_TERMINATION_GRACE_PERIOD_SECONDS)) {
+      terminationGracePeriodSeconds = parseTerminationGracePeriodSeconds(
+          config.get(MasterOptionConstants.K8S_TERMINATION_GRACE_PERIOD_SECONDS));
+    }
     for (String runnableName : runnables) {
       withEnv(runnableName, config);
     }
@@ -453,6 +465,21 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
       configMap.putAll(config);
     }
     return this;
+  }
+
+  private static long parseTerminationGracePeriodSeconds(String value) {
+    String error = String.format("Invalid value '%s' for %s. It must be a non-negative integer.",
+        value, MasterOptionConstants.K8S_TERMINATION_GRACE_PERIOD_SECONDS);
+    long seconds;
+    try {
+      seconds = Long.parseLong(value);
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(error, e);
+    }
+    if (seconds < 0) {
+      throw new IllegalArgumentException(error);
+    }
+    return seconds;
   }
 
   @Override
@@ -630,16 +657,6 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
     return start(60, TimeUnit.SECONDS);
   }
 
-  private void validateSpecification() {
-    if (this.twillSpec.getRunnables().isEmpty()) {
-      throw new RuntimeException("No Twill runnables has been specified");
-    }
-
-    if (this.mainRunnableName == null && this.twillSpec.getRunnables().size() > 1) {
-      throw new RuntimeException("Dependency among Twill runnables has not been specified");
-    }
-  }
-
   @Override
   public TwillController start(long timeout, TimeUnit timeoutUnit) {
     validateSpecification();
@@ -655,21 +672,7 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
       }
 
       RuntimeSpecification mainRuntimeSpec = getMainRuntimeSpecification(twillSpec.getRunnables());
-      StatefulRunnable statefulRunnable = statefulRunnables.get(mainRuntimeSpec.getName());
-      Type resourceType = statefulRunnable == null ? V1Deployment.class : V1StatefulSet.class;
-
-      // Check if ContainerRuntime annotation is present on the twill runnable. If its present, that twill runnable
-      // would be submitted as kubernetes job
-      ClassLoader contextClassLoader = Optional.ofNullable(
-              Thread.currentThread().getContextClassLoader())
-          .orElse(getClass().getClassLoader());
-      for (Annotation annotation : contextClassLoader
-          .loadClass(mainRuntimeSpec.getRunnableSpecification().getClassName()).getAnnotations()) {
-        if (annotation.annotationType().equals(Completable.class)) {
-          resourceType = V1Job.class;
-        }
-      }
-
+      Type resourceType = getResourceType(mainRuntimeSpec);
       V1ObjectMeta metadata = createResourceMetadata(resourceType, mainRuntimeSpec.getName(),
           timeoutUnit.toMillis(timeout), runtimeCleanupDisabled);
       KubernetesObject obj;
@@ -679,7 +682,7 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
         obj = createDeployment(metadata, twillSpec.getRunnables(), runtimeConfigLocation);
       } else {
         obj = createStatefulSet(metadata, twillSpec.getRunnables(), runtimeConfigLocation,
-            statefulRunnable);
+            statefulRunnables.get(mainRuntimeSpec.getName()));
       }
 
       if (shouldLocalizeConfigAsConfigmap(cdapRuntimeNamespace) && obj != null) {
@@ -702,6 +705,51 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
       }
       throw new RuntimeException(errorMsg, e);
     }
+  }
+
+  private void validateSpecification() {
+    if (this.twillSpec.getRunnables().isEmpty()) {
+      throw new RuntimeException("No Twill runnables has been specified");
+    }
+
+    if (this.mainRunnableName == null && this.twillSpec.getRunnables().size() > 1) {
+      throw new RuntimeException("Dependency among Twill runnables has not been specified");
+    }
+
+    if (!recreateStrategy) {
+      return;
+    }
+    RuntimeSpecification mainRuntimeSpec = getMainRuntimeSpecification(twillSpec.getRunnables());
+    Class<? extends KubernetesObject> resourceType;
+    try {
+      resourceType = getResourceType(mainRuntimeSpec);
+    } catch (ClassNotFoundException e) {
+      throw new RuntimeException(String.format("Unable to load runnable class %s",
+          mainRuntimeSpec.getRunnableSpecification().getClassName()), e);
+    }
+    if (!V1Deployment.class.equals(resourceType)) {
+      // Only a Deployment supports the Recreate strategy; StatefulSets and Jobs would drop it.
+      throw new IllegalStateException(String.format(
+          "%s is only supported for Deployments, but runnable %s runs as %s",
+          MasterOptionConstants.K8S_RECREATE_STRATEGY, mainRuntimeSpec.getName(),
+          resourceType.getSimpleName()));
+    }
+  }
+
+  private Class<? extends KubernetesObject> getResourceType(RuntimeSpecification mainRuntimeSpec)
+      throws ClassNotFoundException {
+    // A @Completable runnable runs as a Kubernetes Job; stateful runnables run as a StatefulSet.
+    ClassLoader contextClassLoader = Optional.ofNullable(
+            Thread.currentThread().getContextClassLoader())
+        .orElse(getClass().getClassLoader());
+    Class<?> runnableClass =
+        contextClassLoader.loadClass(mainRuntimeSpec.getRunnableSpecification().getClassName());
+    if (runnableClass.isAnnotationPresent(Completable.class)) {
+      return V1Job.class;
+    }
+    return statefulRunnables.containsKey(mainRuntimeSpec.getName())
+        ? V1StatefulSet.class
+        : V1Deployment.class;
   }
 
   private void setIdentity(String runnableName, String identity) {
@@ -948,15 +996,21 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
    * Return a {@link V1Deployment} object for the {@link TwillRunnable} represented by the
    * given {@link RuntimeSpecification}.
    */
-  private V1Deployment buildDeployment(V1ObjectMeta metadata,
+  @VisibleForTesting
+  V1Deployment buildDeployment(V1ObjectMeta metadata,
       Map<String, RuntimeSpecification> runtimeSpecs, Location runtimeConfigLocation) {
     int replicas = getMainRuntimeSpecification(runtimeSpecs).getResourceSpecification()
         .getInstances();
+    // Null keeps the Kubernetes default, RollingUpdate, which starts the new pod before it deletes
+    // the old one, even at one replica. Recreate deletes the old pod first.
+    V1DeploymentStrategy strategy =
+        recreateStrategy ? new V1DeploymentStrategy().type("Recreate") : null;
     return new V1DeploymentBuilder()
         .withMetadata(metadata)
         .withNewSpec()
         .withSelector(new V1LabelSelector().matchLabels(metadata.getLabels()))
         .withReplicas(replicas)
+        .withStrategy(strategy)
         .withNewTemplate()
         .withMetadata(metadata)
         .withSpec(createPodSpec(runtimeConfigLocation, runtimeSpecs))
@@ -1298,6 +1352,7 @@ class KubeTwillPreparer implements DependentTwillPreparer, StatefulTwillPreparer
             containerArgs))
         .withSecurityContext(podInfo.getSecurityContext())
         .withRestartPolicy(restartPolicy)
+        .withTerminationGracePeriodSeconds(terminationGracePeriodSeconds)
         .build();
   }
 
