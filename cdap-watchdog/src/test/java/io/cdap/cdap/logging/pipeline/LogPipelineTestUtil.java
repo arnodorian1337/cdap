@@ -27,6 +27,7 @@ import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.logging.appender.ForwardingAppender;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.util.Collections;
 import java.util.Map;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.Transformer;
@@ -65,6 +66,7 @@ public final class LogPipelineTestUtil {
     event.setLoggerName(loggerName);
     event.setMessage(message);
     event.setTimeStamp(timestamp);
+    event.setMDCPropertyMap(Collections.emptyMap());
     return event;
   }
 

@@ -249,6 +249,7 @@ public class DistributedLogFrameworkTest {
     event.setLoggerName(loggerName);
     event.setMessage(message);
     event.setTimeStamp(timestamp);
+    event.setMDCPropertyMap(Collections.emptyMap());
     return event;
   }
 

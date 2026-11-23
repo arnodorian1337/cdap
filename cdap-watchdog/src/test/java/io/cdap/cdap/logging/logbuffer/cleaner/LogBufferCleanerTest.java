@@ -32,6 +32,7 @@ import io.cdap.cdap.logging.meta.Checkpoint;
 import io.cdap.cdap.logging.serialize.LoggingEventSerializer;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -110,6 +111,7 @@ public class LogBufferCleanerTest {
     event.setLoggerName(loggerName);
     event.setMessage(message);
     event.setTimeStamp(timestamp);
+    event.setMDCPropertyMap(Collections.emptyMap());
     return new LogMessage(event, loggingContext);
   }
 

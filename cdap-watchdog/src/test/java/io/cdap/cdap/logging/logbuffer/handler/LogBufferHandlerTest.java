@@ -42,6 +42,7 @@ import io.cdap.cdap.logging.pipeline.logbuffer.LogBufferPipelineConfig;
 import io.cdap.cdap.logging.pipeline.logbuffer.LogBufferProcessorPipeline;
 import io.cdap.cdap.security.auth.context.AuthenticationTestContext;
 import io.cdap.http.NettyHttpService;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.apache.twill.discovery.Discoverable;
@@ -145,6 +146,7 @@ public class LogBufferHandlerTest {
       new StackTraceElement("com.Class3",  "methodName3", null, 30),
       null
     });
+    event.setMDCPropertyMap(Collections.emptyMap());
     return event;
   }
 }
