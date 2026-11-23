@@ -19,6 +19,7 @@ package io.cdap.cdap.logging.pipeline;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.joran.JoranConfigurator;
+import ch.qos.logback.classic.util.LogbackMDCAdapter;
 import com.google.common.collect.ImmutableMap;
 import io.cdap.cdap.logging.framework.Loggers;
 import java.io.StringReader;
@@ -43,6 +44,7 @@ public class LoggersTest {
   @Test
   public void testEffectiveLevel() throws Exception {
     LoggerContext context = new LoggerContext();
+    context.setMDCAdapter(new LogbackMDCAdapter());
     JoranConfigurator configurator = new JoranConfigurator();
     configurator.setContext(context);
     configurator.doConfigure(new InputSource(new StringReader(generateLogback("WARN", ImmutableMap.of(

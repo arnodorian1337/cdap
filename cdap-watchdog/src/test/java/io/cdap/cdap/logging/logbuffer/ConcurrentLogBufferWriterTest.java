@@ -40,6 +40,7 @@ import java.io.DataInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -180,6 +181,7 @@ public class ConcurrentLogBufferWriterTest {
     event.setLoggerName(loggerName);
     event.setMessage(message);
     event.setTimeStamp(timestamp);
+    event.setMDCPropertyMap(Collections.emptyMap());
     return new LogMessage(event, loggingContext);
   }
 

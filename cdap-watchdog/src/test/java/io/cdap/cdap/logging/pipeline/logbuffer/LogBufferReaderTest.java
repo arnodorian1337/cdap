@@ -28,6 +28,7 @@ import io.cdap.cdap.logging.logbuffer.LogBufferWriter;
 import io.cdap.cdap.logging.logbuffer.recover.LogBufferReader;
 import io.cdap.cdap.logging.serialize.LoggingEventSerializer;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -105,6 +106,7 @@ public class LogBufferReaderTest {
     event.setLoggerName(loggerName);
     event.setMessage(message);
     event.setTimeStamp(timestamp);
+    event.setMDCPropertyMap(Collections.emptyMap());
     return new LogMessage(event, loggingContext);
   }
 }

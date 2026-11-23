@@ -32,6 +32,7 @@ import io.cdap.cdap.logging.appender.LogMessage;
 import io.cdap.cdap.logging.context.LoggingContextHelper;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.Assert;
@@ -93,6 +94,7 @@ public class LoggingEventSerializerTest {
     Exception e1 = new Exception(null, null);
     Exception e2 = new Exception("Test Exception2", e1);
     iLoggingEvent.setThrowableProxy(new ThrowableProxy(e2));
+    iLoggingEvent.setMDCPropertyMap(mdcMap);
     iLoggingEvent.prepareForDeferredProcessing();
     ((ThrowableProxy) iLoggingEvent.getThrowableProxy()).calculatePackagingData();
 
@@ -104,8 +106,7 @@ public class LoggingEventSerializerTest {
       null
     });
 
-    iLoggingEvent.setMarker(null);
-    iLoggingEvent.getMDCPropertyMap().putAll(mdcMap);
+    iLoggingEvent.addMarker(null);
     iLoggingEvent.setTimeStamp(1234567890L);
 
     // Serialize
@@ -149,7 +150,7 @@ public class LoggingEventSerializerTest {
     iLoggingEvent.setLoggerContextRemoteView(null);
     iLoggingEvent.setThrowableProxy(null);
     iLoggingEvent.setCallerData(null);
-    iLoggingEvent.setMarker(null);
+    iLoggingEvent.addMarker(null);
     iLoggingEvent.setMDCPropertyMap(null);
     iLoggingEvent.setTimeStamp(10000000L);
 
@@ -173,6 +174,7 @@ public class LoggingEventSerializerTest {
     event.setLoggerName("test.logger");
     event.setMessage("Some test");
     event.setTimeStamp(timestamp);
+    event.setMDCPropertyMap(Collections.emptyMap());
 
     // Serialize it
     LoggingEventSerializer serializer = new LoggingEventSerializer();
@@ -183,7 +185,8 @@ public class LoggingEventSerializerTest {
   }
 
   static void assertLoggingEventEquals(ILoggingEvent expected, ILoggingEvent actual) {
-    expected.getMDCPropertyMap().putAll(
+    Map<String, String> expectedMdc = new HashMap<>(expected.getMDCPropertyMap());
+    expectedMdc.putAll(
       ImmutableMap.of(".namespaceId", "TEST_ACCT_ID1", ".applicationId", "TEST_APP_ID1", ".runId", "RUN1",
                       ".instanceId", "INSTANCE1"));
 
@@ -203,7 +206,7 @@ public class LoggingEventSerializerTest {
 
     Assert.assertEquals(expected.getMarker(), actual.getMarker());
     Assert.assertEquals(expected.getTimeStamp(), actual.getTimeStamp());
-    Assert.assertEquals(expected.getMDCPropertyMap(), actual.getMDCPropertyMap());
+    Assert.assertEquals(expectedMdc, actual.getMDCPropertyMap());
 
     assertThrowableProxyEquals(expected.getThrowableProxy(), actual.getThrowableProxy());
   }

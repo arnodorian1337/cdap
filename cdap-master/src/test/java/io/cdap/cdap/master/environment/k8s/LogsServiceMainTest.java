@@ -55,6 +55,7 @@ import java.lang.reflect.Type;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.apache.avro.Schema;
@@ -139,6 +140,7 @@ public class LogsServiceMainTest extends MasterServiceMainTestBase {
     event.setLoggerName("test.logger");
     event.setMessage(message);
     event.setTimeStamp(timestamp);
+    event.setMDCPropertyMap(Collections.emptyMap());
     return new LogMessage(event, loggingContext);
   }
 

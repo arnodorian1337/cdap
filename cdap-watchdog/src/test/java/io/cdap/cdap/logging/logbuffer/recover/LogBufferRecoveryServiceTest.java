@@ -38,6 +38,7 @@ import io.cdap.cdap.logging.pipeline.MockAppender;
 import io.cdap.cdap.logging.pipeline.logbuffer.LogBufferPipelineConfig;
 import io.cdap.cdap.logging.pipeline.logbuffer.LogBufferProcessorPipeline;
 import io.cdap.cdap.logging.serialize.LoggingEventSerializer;
+import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.ClassRule;
@@ -114,6 +115,7 @@ public class LogBufferRecoveryServiceTest {
     event.setLoggerName(loggerName);
     event.setMessage(message);
     event.setTimeStamp(timestamp);
+    event.setMDCPropertyMap(Collections.emptyMap());
     return new LogMessage(event, loggingContext);
   }
 }
