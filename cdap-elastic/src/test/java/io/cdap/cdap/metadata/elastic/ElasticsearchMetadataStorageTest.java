@@ -19,12 +19,14 @@ package io.cdap.cdap.metadata.elastic;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Closeables;
+import com.google.gson.JsonParseException;
 import io.cdap.cdap.api.metadata.MetadataEntity;
 import io.cdap.cdap.api.metadata.MetadataScope;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.SConfiguration;
 import io.cdap.cdap.common.metadata.Cursor;
 import io.cdap.cdap.spi.metadata.Metadata;
+import io.cdap.cdap.spi.metadata.MetadataChange;
 import io.cdap.cdap.spi.metadata.MetadataKind;
 import io.cdap.cdap.spi.metadata.MetadataMutation.Drop;
 import io.cdap.cdap.spi.metadata.MetadataMutation.Update;
@@ -32,21 +34,30 @@ import io.cdap.cdap.spi.metadata.MetadataRecord;
 import io.cdap.cdap.spi.metadata.MetadataStorage;
 import io.cdap.cdap.spi.metadata.MetadataStorageTest;
 import io.cdap.cdap.spi.metadata.MutationOptions;
+import io.cdap.cdap.spi.metadata.Read;
 import io.cdap.cdap.spi.metadata.ScopedName;
 import io.cdap.cdap.spi.metadata.ScopedNameOfKind;
 import io.cdap.cdap.spi.metadata.SearchRequest;
 import io.cdap.cdap.spi.metadata.SearchResponse;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import org.apache.hc.core5.http.HttpHost;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.opensearch.client.json.JsonData;
+import org.opensearch.client.json.jsonb.JsonbJsonpMapper;
+import org.opensearch.client.opensearch.OpenSearchClient;
+import org.opensearch.client.opensearch._types.OpenSearchException;
+import org.opensearch.client.transport.httpclient5.ApacheHttpClient5Transport;
+import org.opensearch.client.transport.httpclient5.ApacheHttpClient5TransportBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,7 +83,7 @@ public class ElasticsearchMetadataStorageTest extends MetadataStorageTest {
     cConf.setInt(Config.CONF_ELASTIC_WINDOW_SIZE, 128);
     String elasticPort = System.getProperty("elastic.http.port");
     if (elasticPort != null && !elasticPort.isEmpty()) {
-      LOG.info("Elasticsearch port is {}", elasticPort);
+      LOG.info("OpenSearch port is {}", elasticPort);
       cConf.set(Config.CONF_ELASTIC_HOSTS, "localhost:" + elasticPort);
     }
     SConfiguration sConf = SConfiguration.create();
@@ -373,6 +384,132 @@ public class ElasticsearchMetadataStorageTest extends MetadataStorageTest {
 
     // clean up
     mds.batch(records.stream().map(MetadataRecord::getEntity).map(Drop::new).collect(Collectors.toList()), options);
+  }
+
+  @Test
+  public void testBatchWithTwoVersionsOfSameApp() throws IOException {
+    MetadataStorage mds = getMetadataStorage();
+    MetadataEntity v42 = MetadataEntity.builder()
+        .append(MetadataEntity.NAMESPACE, "ns")
+        .appendAsType(MetadataEntity.APPLICATION, "dupapp")
+        .append(MetadataEntity.VERSION, "42")
+        .build();
+    MetadataEntity snapshot = MetadataEntity.builder()
+        .append(MetadataEntity.NAMESPACE, "ns")
+        .appendAsType(MetadataEntity.APPLICATION, "dupapp")
+        .append(MetadataEntity.VERSION, "-SNAPSHOT")
+        .build();
+    Metadata m1 = new Metadata(MetadataScope.USER, tags("t1"), props("a", "1"));
+    Metadata m2 = new Metadata(MetadataScope.USER, tags("t2"), props("b", "2"));
+    Metadata merged = new Metadata(MetadataScope.USER, tags("t1", "t2"), props("a", "1", "b", "2"));
+
+    try {
+      // Both versions are the same document, so the two writes must not be in the same bulk request
+      List<MetadataChange> changes = mds.batch(
+          Arrays.asList(new Update(v42, m1), new Update(snapshot, m2)), MutationOptions.DEFAULT);
+      Assert.assertEquals(2, changes.size());
+      Assert.assertEquals(m1, changes.get(0).getAfter());
+      Assert.assertEquals(m1, changes.get(1).getBefore());
+      Assert.assertEquals(merged, changes.get(1).getAfter());
+      Assert.assertEquals(merged, mds.read(new Read(v42)));
+    } finally {
+      mds.apply(new Drop(v42), MutationOptions.DEFAULT);
+    }
+  }
+
+  @Test
+  public void testBatchDropOfMissingEntities() throws IOException {
+    MetadataStorage mds = getMetadataStorage();
+    MetadataEntity e1 = MetadataEntity.ofDataset("ns", "missing1");
+    MetadataEntity e2 = MetadataEntity.ofDataset("ns", "missing2");
+    // A delete of a missing document is not an error, so the batch succeeds
+    List<MetadataChange> changes = mds.batch(
+        Arrays.asList(new Drop(e1), new Drop(e2)), MutationOptions.DEFAULT);
+    Assert.assertEquals(Arrays.asList(
+        new MetadataChange(e1, Metadata.EMPTY, Metadata.EMPTY),
+        new MetadataChange(e2, Metadata.EMPTY, Metadata.EMPTY)), changes);
+  }
+
+  @Test
+  public void testReadFromMissingIndexFails() throws IOException {
+    String indexName = "idxmissing" + Math.abs(new Random().nextInt());
+    try (ElasticsearchMetadataStorage store = newStore(indexName)) {
+      // A missing index must not be mistaken for a missing document
+      store.read(new Read(MetadataEntity.ofDataset("ns", "ds")));
+      Assert.fail("Expected reading from a missing index to fail");
+    } catch (IOException e) {
+      Assert.assertTrue(e.getMessage(), e.getMessage().contains("index_not_found_exception"));
+      Assert.assertTrue(String.valueOf(e.getCause()), e.getCause() instanceof OpenSearchException);
+    }
+  }
+
+  @Test
+  public void testBatchOnMissingIndexFails() throws IOException {
+    String indexName = "idxmissingbatch" + Math.abs(new Random().nextInt());
+    try (ElasticsearchMetadataStorage store = newStore(indexName)) {
+      // A batch of several entities reads them with one multi-get request
+      store.batch(Arrays.asList(
+          new Update(MetadataEntity.ofDataset("ns", "ds1"), Metadata.EMPTY),
+          new Update(MetadataEntity.ofDataset("ns", "ds2"), Metadata.EMPTY)),
+          MutationOptions.DEFAULT);
+      Assert.fail("Expected a batch on a missing index to fail");
+    } catch (IOException e) {
+      Assert.assertTrue(e.getMessage(),
+          e.getMessage().startsWith("Failed to read from index for entit"));
+    }
+  }
+
+  @Test
+  public void testReadUnparsableDocumentFails() throws IOException {
+    String indexName = "idxunparsable" + Math.abs(new Random().nextInt());
+    try (ElasticsearchMetadataStorage store = newStore(indexName);
+         ApacheHttpClient5Transport transport = ApacheHttpClient5TransportBuilder
+             .builder(new HttpHost("http", "localhost", Integer.parseInt(getElasticPort())))
+             .setMapper(new JsonbJsonpMapper()).build()) {
+      store.createIndex();
+      try {
+        // The document has metadata that is not an object
+        JsonData source = JsonData.of(Collections.singletonMap("metadata", 42));
+        new OpenSearchClient(transport).index(i -> i.index(indexName)
+            .id("dataset:namespace=ns,dataset=ds").document(source));
+        store.read(new Read(MetadataEntity.ofDataset("ns", "ds")));
+        Assert.fail("Expected reading an unparsable document to fail");
+      } catch (IOException e) {
+        Assert.assertTrue(e.getMessage(),
+            e.getMessage().startsWith("Failed to read from index for entity"));
+        Assert.assertTrue(String.valueOf(e.getCause()), e.getCause() instanceof JsonParseException);
+      } finally {
+        store.dropIndex();
+      }
+    }
+  }
+
+  @Test
+  public void testCreateIndexFailureIsReported() throws IOException {
+    CConfiguration cConf = CConfiguration.create();
+    cConf.set(Config.CONF_ELASTIC_INDEX_NAME, "idxbad" + Math.abs(new Random().nextInt()));
+    cConf.set(Config.CONF_ELASTIC_HOSTS, "localhost:" + getElasticPort());
+    // An index must have at least one shard, so the request to create it fails
+    cConf.setInt(Config.CONF_ELASTIC_NUM_SHARDS, 0);
+    try (ElasticsearchMetadataStorage store =
+        new ElasticsearchMetadataStorage(cConf, SConfiguration.create())) {
+      store.createIndex();
+      Assert.fail("Expected creating the index to fail");
+    } catch (IOException e) {
+      Assert.assertTrue(e.getMessage(), e.getMessage().startsWith("Unable to create index"));
+      Assert.assertTrue(String.valueOf(e.getCause()), e.getCause() instanceof OpenSearchException);
+    }
+  }
+
+  private static String getElasticPort() {
+    return System.getProperty("elastic.http.port", "9200");
+  }
+
+  private static ElasticsearchMetadataStorage newStore(String indexName) {
+    CConfiguration cConf = CConfiguration.create();
+    cConf.set(Config.CONF_ELASTIC_INDEX_NAME, indexName);
+    cConf.set(Config.CONF_ELASTIC_HOSTS, "localhost:" + getElasticPort());
+    return new ElasticsearchMetadataStorage(cConf, SConfiguration.create());
   }
 
   @Override
